@@ -44,6 +44,10 @@
     { "id": "e23", "from": "n6", "to": "n7", "type": "stairs", "length": 6, "seconds": 15, "width": 1.0, "slope": 30 },
     { "id": "e24", "from": "n7", "to": "n6", "type": "stairs", "length": 6, "seconds": 15, "width": 1.0, "slope": 30 },
     { "id": "e25", "from": "n1", "to": "n13", "type": "corridor", "length": 10, "seconds": 12, "width": 1.5, "slope": 0 },
-    { "id": "e26", "from": "n13", "to": "n1", "type": "corridor", "length": 10, "seconds": 12, "width": 1.5, "slope": 0 }
+    { "id": "e26", "from": "n13", "to": "n1", "type": "corridor", "length": 10, "seconds": 12, "width": 1.5, "slope": 0 },
+    { "id": "e27", "from": "n3", "to": "n8", "type": "elevator", "length": 4, "seconds": 8, "width": 1.5, "slope": 0 },
+    { "id": "e28", "from": "n8", "to": "n3", "type": "elevator", "length": 4, "seconds": 8, "width": 1.5, "slope": 0 },
+    { "id": "e29", "from": "n1", "to": "n2", "type": "corridor", "length": 12, "seconds": 30, "width": 1.0, "slope": 0 },
+    { "id": "e30", "from": "n2", "to": "n1", "type": "corridor", "length": 12, "seconds": 30, "width": 1.0, "slope": 0 }
   ]
 }

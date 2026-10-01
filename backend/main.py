@@ -139,6 +139,21 @@ def _build_closures_by_edge(
     return result
 
 
+def _enrich_steps(result: dict[str, Any], data: dict[str, Any]) -> None:
+    """Annotate the selected channel steps with floor/node display names."""
+    if not result.get("reachable"):
+        return
+    floor_names = {f["id"]: f["name"] for f in data.get("floors", [])}
+    node_names = {n["id"]: n.get("name") for n in data.get("nodes", [])}
+    node_floors = {n["id"]: n["floor_id"] for n in data.get("nodes", [])}
+    for step in result.get("steps", []):
+        floor_id = step.get("floor_id") or node_floors.get(step["from_node"], "")
+        step["floor_id"] = floor_id
+        step["floor_name"] = floor_names.get(floor_id)
+        step["from_name"] = node_names.get(step["from_node"])
+        step["to_name"] = node_names.get(step["to_node"])
+
+
 @app.post("/api/route/query")
 def query_route(q: RouteQuery) -> dict[str, Any]:
     res = db.get_current_network()
@@ -164,6 +179,10 @@ def query_route(q: RouteQuery) -> dict[str, Any]:
         q.max_slope,
         closures_by_edge,
     )
+
+    # Attach display metadata for the actually selected channel steps.
+    # This enriched result is what gets solidified into the record.
+    _enrich_steps(result, data)
 
     # Solidify the record.
     closure_version, closure_snap = db.closure_snapshot(version)

@@ -180,45 +180,83 @@ function renderMap() {
   // 绘制边
   const edgeLayer = document.createElementNS(SVG_NS, "g");
   edgeLayer.setAttribute("class", "edges");
-  edges.forEach((e) => {
+
+  // 给同一起终点的并行通道分组，绘制时错开，避免后导入的通道遮住前者
+  const parallelIndex = new Map();
+  edges.forEach((e, i) => {
+    const key = e.from < e.to ? `${e.from}|${e.to}` : `${e.to}|${e.from}`;
+    if (!parallelIndex.has(key)) parallelIndex.set(key, []);
+    parallelIndex.get(key).push(i);
+  });
+  const offsetSlot = new Array(edges.length);
+  parallelIndex.forEach((indices) => {
+    indices.forEach((edgeIdx, slot) => {
+      offsetSlot[edgeIdx] = { slot, count: indices.length };
+    });
+  });
+
+  edges.forEach((e, edgeIdx) => {
     const from = nodes.find((n) => n.id === e.from);
     const to = nodes.find((n) => n.id === e.to);
     if (!from || !to) return;
     // 只绘制本楼层的边（两端都在本楼层）
     if (from.floor_id !== state.currentFloorId && to.floor_id !== state.currentFloorId) return;
 
-    const line = document.createElementNS(SVG_NS, "line");
-    line.setAttribute("x1", from.x);
-    line.setAttribute("y1", from.y);
-    line.setAttribute("x2", to.x);
-    line.setAttribute("y2", to.y);
-    line.setAttribute("class", "edge-line");
-    line.setAttribute("stroke", edgeColor(e.type));
-    line.setAttribute("stroke-width", edgeWidth(e.type));
-    line.setAttribute("stroke-dasharray", e.type === "stairs" ? "6,4" : "none");
-    line.dataset.edgeId = e.id;
+    // 并行通道沿法向错开，保证每条都可见可点
+    const slotInfo = offsetSlot[edgeIdx];
+    const parallel = slotInfo && slotInfo.count > 1;
+    let mx = (from.x + to.x) / 2;
+    let my = (from.y + to.y) / 2;
+    let labelDy = -4;
+    let geom;
+    if (parallel) {
+      const dx = to.x - from.x;
+      const dy = to.y - from.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const nx = -dy / len;
+      const ny = dx / len;
+      const spread = 6;
+      const offset = (slotInfo.slot - (slotInfo.count - 1) / 2) * spread;
+      const cx = mx + nx * offset;
+      const cy = my + ny * offset;
+      geom = document.createElementNS(SVG_NS, "path");
+      geom.setAttribute("d", `M ${from.x} ${from.y} Q ${cx} ${cy} ${to.x} ${to.y}`);
+      geom.setAttribute("fill", "none");
+      mx = cx;
+      my = cy;
+      labelDy = 4;
+    } else {
+      geom = document.createElementNS(SVG_NS, "line");
+      geom.setAttribute("x1", from.x);
+      geom.setAttribute("y1", from.y);
+      geom.setAttribute("x2", to.x);
+      geom.setAttribute("y2", to.y);
+    }
+    geom.setAttribute("class", "edge-line");
+    geom.setAttribute("stroke", edgeColor(e.type));
+    geom.setAttribute("stroke-width", edgeWidth(e.type));
+    geom.setAttribute("stroke-dasharray", e.type === "stairs" ? "6,4" : "none");
+    geom.dataset.edgeId = e.id;
 
     // 高亮路线
     if (state.routeResult && state.routeResult.reachable) {
       const routeEdgeIds = new Set(state.routeResult.steps.map((s) => s.edge_id));
       if (routeEdgeIds.has(e.id)) {
-        line.setAttribute("stroke", "#ef4444");
-        line.setAttribute("stroke-width", edgeWidth(e.type) + 3);
-        line.style.opacity = "1";
+        geom.setAttribute("stroke", "#ef4444");
+        geom.setAttribute("stroke-width", edgeWidth(e.type) + 3);
+        geom.style.opacity = "1";
       } else {
-        line.style.opacity = "0.35";
+        geom.style.opacity = "0.35";
       }
     }
 
-    line.addEventListener("click", () => showEdgeInfo(e));
-    edgeLayer.appendChild(line);
+    geom.addEventListener("click", () => showEdgeInfo(e));
+    edgeLayer.appendChild(geom);
 
     // 边标签
-    const mx = (from.x + to.x) / 2;
-    const my = (from.y + to.y) / 2;
     const text = document.createElementNS(SVG_NS, "text");
     text.setAttribute("x", mx);
-    text.setAttribute("y", my - 4);
+    text.setAttribute("y", my + labelDy);
     text.setAttribute("class", "edge-label");
     text.textContent = e.id;
     edgeLayer.appendChild(text);
@@ -509,11 +547,16 @@ function renderResult() {
     <div class="result-meta">核验记录 #${r.record_id} · 路网 v${r.network_version} · 封闭版本 v${r.closure_version}</div>
   </div>`;
 
-  // 按楼层分组步骤
+  // 按楼层分组步骤（旧核验记录的步骤可能没有 floor_id，按起点节点回退推断）
+  const floorOfNode = {};
+  state.network.data.nodes.forEach((n) => {
+    floorOfNode[n.id] = n.floor_id;
+  });
   const stepsByFloor = {};
   r.steps.forEach((s) => {
-    if (!stepsByFloor[s.floor_id]) stepsByFloor[s.floor_id] = [];
-    stepsByFloor[s.floor_id].push(s);
+    const fid = s.floor_id || floorOfNode[s.from_node];
+    if (!stepsByFloor[fid]) stepsByFloor[fid] = [];
+    stepsByFloor[fid].push(s);
   });
 
   const floorOrder = state.network.data.floors.map((f) => f.id);
