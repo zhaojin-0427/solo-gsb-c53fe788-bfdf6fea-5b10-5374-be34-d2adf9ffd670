@@ -178,8 +178,11 @@ function renderMap() {
   svg.setAttribute("height", height);
 
   // 绘制边
+  // 同一起终点可能存在多条并行通道（ID 不同）：按同层无向端点对分组，
+  // 渲染时沿法向错开，避免互相覆盖。
   const edgeLayer = document.createElementNS(SVG_NS, "g");
   edgeLayer.setAttribute("class", "edges");
+  const pairGroups = new Map();
   edges.forEach((e) => {
     const from = nodes.find((n) => n.id === e.from);
     const to = nodes.find((n) => n.id === e.to);
@@ -187,41 +190,62 @@ function renderMap() {
     // 只绘制本楼层的边（两端都在本楼层）
     if (from.floor_id !== state.currentFloorId && to.floor_id !== state.currentFloorId) return;
 
-    const line = document.createElementNS(SVG_NS, "line");
-    line.setAttribute("x1", from.x);
-    line.setAttribute("y1", from.y);
-    line.setAttribute("x2", to.x);
-    line.setAttribute("y2", to.y);
-    line.setAttribute("class", "edge-line");
-    line.setAttribute("stroke", edgeColor(e.type));
-    line.setAttribute("stroke-width", edgeWidth(e.type));
-    line.setAttribute("stroke-dasharray", e.type === "stairs" ? "6,4" : "none");
-    line.dataset.edgeId = e.id;
+    const pairKey = [e.from, e.to].sort().join("|");
+    if (!pairGroups.has(pairKey)) pairGroups.set(pairKey, []);
+    pairGroups.get(pairKey).push({ e, from, to });
+  });
 
-    // 高亮路线
-    if (state.routeResult && state.routeResult.reachable) {
-      const routeEdgeIds = new Set(state.routeResult.steps.map((s) => s.edge_id));
-      if (routeEdgeIds.has(e.id)) {
-        line.setAttribute("stroke", "#ef4444");
-        line.setAttribute("stroke-width", edgeWidth(e.type) + 3);
-        line.style.opacity = "1";
-      } else {
-        line.style.opacity = "0.35";
+  pairGroups.forEach((members) => {
+    const dx = members[0].to.x - members[0].from.x;
+    const dy = members[0].to.y - members[0].from.y;
+    const norm = Math.hypot(dx, dy) || 1;
+    // 法向单位向量
+    const nx = -dy / norm;
+    const ny = dx / norm;
+    const count = members.length;
+    members.forEach(({ e, from, to }, idx) => {
+      // 多条并行通道依次向两侧错开
+      const rank = count === 1 ? 0 : idx - (count - 1) / 2;
+      const gap = 6;
+      const ox = nx * rank * gap;
+      const oy = ny * rank * gap;
+
+      const line = document.createElementNS(SVG_NS, "line");
+      line.setAttribute("x1", from.x + ox);
+      line.setAttribute("y1", from.y + oy);
+      line.setAttribute("x2", to.x + ox);
+      line.setAttribute("y2", to.y + oy);
+      line.setAttribute("class", "edge-line");
+      line.setAttribute("stroke", edgeColor(e.type));
+      line.setAttribute("stroke-width", edgeWidth(e.type));
+      line.setAttribute("stroke-dasharray", e.type === "stairs" ? "6,4" : "none");
+      line.dataset.edgeId = e.id;
+
+      // 高亮路线
+      if (state.routeResult && state.routeResult.reachable) {
+        const routeEdgeIds = new Set(state.routeResult.steps.map((s) => s.edge_id));
+        if (routeEdgeIds.has(e.id)) {
+          line.setAttribute("stroke", "#ef4444");
+          line.setAttribute("stroke-width", edgeWidth(e.type) + 3);
+          line.style.opacity = "1";
+        } else {
+          line.style.opacity = "0.35";
+        }
       }
-    }
 
-    line.addEventListener("click", () => showEdgeInfo(e));
-    edgeLayer.appendChild(line);
+      line.addEventListener("click", () => showEdgeInfo(e));
+      edgeLayer.appendChild(line);
 
-    // 边标签
-    const mx = (from.x + to.x) / 2;
-    const my = (from.y + to.y) / 2;
-    const text = document.createElementNS(SVG_NS, "text");
-    text.setAttribute("x", mx);
-    text.setAttribute("y", my - 4);
-    text.setAttribute("class", "edge-label");
-    text.textContent = e.id;
-    edgeLayer.appendChild(text);
+      // 边标签
+      const mx = (from.x + to.x) / 2 + ox * 1.6;
+      const my = (from.y + to.y) / 2 + oy * 1.6;
+      const text = document.createElementNS(SVG_NS, "text");
+      text.setAttribute("x", mx);
+      text.setAttribute("y", my - 4);
+      text.setAttribute("class", "edge-label");
+      text.textContent = e.id;
+      edgeLayer.appendChild(text);
+    });
   });
   svg.appendChild(edgeLayer);
 
@@ -509,11 +533,17 @@ function renderResult() {
     <div class="result-meta">核验记录 #${r.record_id} · 路网 v${r.network_version} · 封闭版本 v${r.closure_version}</div>
   </div>`;
 
-  // 按楼层分组步骤
+  // 按楼层分组步骤；旧核验记录的步骤没有 floor_id 时，按当时路网数据回推。
+  const nodeFloor = {};
+  state.network.data.nodes.forEach((n) => {
+    nodeFloor[n.id] = n.floor_id;
+  });
+  const stepFloorId = (s) => s.floor_id || nodeFloor[s.to_node] || "";
   const stepsByFloor = {};
   r.steps.forEach((s) => {
-    if (!stepsByFloor[s.floor_id]) stepsByFloor[s.floor_id] = [];
-    stepsByFloor[s.floor_id].push(s);
+    const fid = stepFloorId(s);
+    if (!stepsByFloor[fid]) stepsByFloor[fid] = [];
+    stepsByFloor[fid].push(s);
   });
 
   const floorOrder = state.network.data.floors.map((f) => f.id);

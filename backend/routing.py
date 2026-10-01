@@ -1,6 +1,10 @@
 """Network validation and time-dependent wheelchair routing.
 
-The routing problem is a time-dependent shortest path in a directed graph:
+The routing problem is a time-dependent shortest path in a directed
+multi-graph:
+  * Multiple channels may share the same (from, to) pair; every channel is
+    keyed by its own ID and participates independently in all feasibility
+    checks and searches.
   * Stairs are never passable.
   * Cross-floor edges are only allowed for elevators or ramps.
   * Corridors connect nodes on the same floor.
@@ -16,7 +20,6 @@ import heapq
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import networkx as nx
 
@@ -83,7 +86,7 @@ def validate_network(data: dict[str, Any]) -> None:
         if n["id"] not in connected:
             errors.append(f"节点 {n['id']} 是悬空节点（未连接任何通道）")
 
-    # Cross-floor legality
+    # Cross-floor legality — every parallel channel is checked individually.
     node_floor = {n["id"]: n["floor_id"] for n in nodes}
     for e in edges:
         if e["from"] in node_ids and e["to"] in node_ids:
@@ -119,10 +122,15 @@ def validate_network(data: dict[str, Any]) -> None:
 # Graph construction
 # ---------------------------------------------------------------------------
 
-def build_graph(data: dict[str, Any]) -> nx.DiGraph:
-    """Build a NetworkX DiGraph from validated network data."""
-    G = nx.DiGraph()
-    node_floor: dict[str, str] = {}
+def build_graph(data: dict[str, Any]) -> nx.MultiDiGraph:
+    """Build a NetworkX MultiDiGraph from validated network data.
+
+    A MultiDiGraph is required because several channels may share the same
+    (from, to) pair with different IDs / widths / seconds / closures. Each
+    edge is keyed by its channel ID so no channel can overwrite another.
+    """
+    G = nx.MultiDiGraph()
+    G.graph["floor_names"] = {f["id"]: f.get("name", f["id"]) for f in data["floors"]}
     for n in data["nodes"]:
         G.add_node(
             n["id"],
@@ -132,11 +140,12 @@ def build_graph(data: dict[str, Any]) -> nx.DiGraph:
             kind=n.get("kind", "junction"),
             name=n.get("name"),
         )
-        node_floor[n["id"]] = n["floor_id"]
+    node_floor = {n["id"]: n["floor_id"] for n in data["nodes"]}
     for e in data["edges"]:
         G.add_edge(
             e["from"],
             e["to"],
+            key=e["id"],
             id=e["id"],
             type=e.get("type", TYPE_CORRIDOR),
             length=float(e.get("length", 0.0)),
@@ -212,11 +221,6 @@ class Label:
         return (self.arrival, self.distance, self.seq)
 
 
-def _lex_le(a: tuple[str, ...], b: tuple[str, ...]) -> bool:
-    """Lexicographic comparison of edge-id sequences."""
-    return a <= b
-
-
 def _dominates(a: Label, b: Label) -> bool:
     """Return True if label a dominates label b (a is no worse in all
     dimensions and strictly better in at least one)."""
@@ -224,17 +228,22 @@ def _dominates(a: Label, b: Label) -> bool:
         return False
     if a.distance > b.distance:
         return False
-    if not _lex_le(a.seq, b.seq):
-        return False
-    # All <=; need at least one strict.
-    if a.arrival < b.arrival or a.distance < b.distance or a.seq < b.seq:
+    if a.arrival < b.arrival or a.distance < b.distance:
+        return True
+    # Equal arrival and distance: lexicographic edge-ID sequence decides.
+    # Sequences of different lengths are only produced through zero-cost
+    # cycles; keep both (the search bounds walk length) rather than using
+    # prefix ordering, which is not preserved under extension.
+    if len(a.seq) == len(b.seq) and a.seq < b.seq:
         return True
     return False
 
 
 def _add_label(labels: list[Label], new: Label) -> bool:
     """Add new label to labels, removing dominated ones. Return True if added."""
-    for i, lab in enumerate(labels):
+    for lab in labels:
+        if lab.arrival == new.arrival and lab.distance == new.distance and lab.seq == new.seq:
+            return False  # identical label
         if _dominates(lab, new):
             return False
     # Remove labels dominated by new.
@@ -244,8 +253,22 @@ def _add_label(labels: list[Label], new: Label) -> bool:
     return True
 
 
+def _edge_static_ok(edata: dict[str, Any], min_width: float, max_slope: float) -> bool:
+    """Static wheelchair feasibility of a single channel (independent of
+    other parallel channels)."""
+    if edata["type"] == TYPE_STAIRS:
+        return False
+    if edata["type"] not in PASSABLE_TYPES:
+        return False
+    if edata["width"] < min_width:
+        return False
+    if edata["slope"] > max_slope:
+        return False
+    return True
+
+
 def find_route(
-    G: nx.DiGraph,
+    G: nx.MultiDiGraph,
     start: str,
     end: str,
     departure: datetime,
@@ -270,36 +293,31 @@ def find_route(
             "blocking_closures": [],
         }
 
-    # Static feasibility: does any path exist under width/slope/type constraints?
-    def static_ok(u: str, v: str, data: dict[str, Any]) -> bool:
-        if data["type"] not in PASSABLE_TYPES:
-            return False
-        if data["type"] == TYPE_STAIRS:
-            return False
-        if data["width"] < min_width:
-            return False
-        if data["slope"] > max_slope:
-            return False
-        return True
+    def static_ok(edata: dict[str, Any]) -> bool:
+        return _edge_static_ok(edata, min_width, max_slope)
 
+    # Static feasibility over the complete channel set: a subgraph view that
+    # keeps every (u, v, key) channel passing the wheelchair constraints.
     static_G = nx.subgraph_view(
         G,
-        filter_edge=lambda u, v: static_ok(u, v, G[u][v]),
+        filter_edge=lambda u, v, k: static_ok(G[u][v][k]),
     )
     if not nx.has_path(static_G, start, end):
-        reasons = ["不存在满足净宽/坡度要求的可达路径"]
+        reasons = ["不存在满足净宽/坡度/楼梯/跨层限制的可达路径"]
         # Distinguish disconnection vs constraint blocking.
         if not nx.has_path(G, start, end):
             reasons.append("起终点在路网中不连通")
         else:
-            reasons.append("所有路径均被净宽或坡度限制阻断")
+            reasons.append("所有路径均被净宽、坡度、楼梯或跨层限制阻断")
         return {
             "reachable": False,
             "reasons": reasons,
             "blocking_closures": [],
         }
 
-    # Label-setting search.
+    floor_names: dict[str, str] = G.graph.get("floor_names", {})
+
+    # Label-setting search over all parallel channels.
     labels: dict[str, list[Label]] = {n: [] for n in G.nodes}
     start_label = Label(node=start, arrival=departure_utc, distance=0.0, seq=())
     labels[start].append(start_label)
@@ -309,6 +327,9 @@ def find_route(
     heapq.heappush(heap, (start_label.arrival, 0.0, (), counter, start_label))
 
     best: Label | None = None
+    # A walk longer than the number of channels repeats a channel; cap it so
+    # zero-cost cycles cannot create infinitely many labels.
+    max_steps = G.number_of_edges()
 
     while heap:
         arr, dist, seq, _, lab = heapq.heappop(heap)
@@ -324,51 +345,64 @@ def find_route(
                 best = lab
             continue
 
-        for v, edata in G[lab.node].items():
-            if not static_ok(lab.node, v, edata):
-                continue
-            eid = edata["id"]
-            closures = closures_by_edge.get(eid, [])
-            dep = earliest_departure(lab.arrival, edata["seconds"], closures)
-            arr_v = dep + timedelta(seconds=edata["seconds"])
-            if arr_v > deadline:
-                continue
-            dist_v = lab.distance + edata["length"]
-            seq_v = lab.seq + (eid,)
+        if len(lab.seq) >= max_steps:
+            continue
 
-            step = {
-                "edge_id": eid,
-                "from_node": lab.node,
-                "to_node": v,
-                "type": edata["type"],
-                "length": edata["length"],
-                "seconds": edata["seconds"],
-                "width": edata["width"],
-                "slope": edata["slope"],
-                "wait_seconds": (dep - lab.arrival).total_seconds(),
-                "arrival": arr_v.isoformat(),
-                "cross_floor": edata["cross_floor"],
-            }
-            new_label = Label(
-                node=v,
-                arrival=arr_v,
-                distance=dist_v,
-                seq=seq_v,
-                path=lab.path + [step],
-            )
-            if _add_label(labels[v], new_label):
-                counter += 1
-                heapq.heappush(
-                    heap,
-                    (new_label.arrival, new_label.distance, new_label.seq, counter, new_label),
+        # MultiDiGraph adjacency: G[u] maps v -> {edge_key: edata}, so every
+        # parallel channel with its own ID is relaxed independently.
+        for v, parallel in G[lab.node].items():
+            for ekey, edata in parallel.items():
+                if not static_ok(edata):
+                    continue
+                eid = edata["id"]
+                closures = closures_by_edge.get(eid, [])
+                dep = earliest_departure(lab.arrival, edata["seconds"], closures)
+                arr_v = dep + timedelta(seconds=edata["seconds"])
+                if arr_v > deadline:
+                    continue
+                dist_v = lab.distance + edata["length"]
+                seq_v = lab.seq + (eid,)
+
+                floor_id = G.nodes[v]["floor_id"]
+                step = {
+                    "edge_id": eid,
+                    "from_node": lab.node,
+                    "to_node": v,
+                    "from_name": G.nodes[lab.node].get("name"),
+                    "to_name": G.nodes[v].get("name"),
+                    "floor_id": floor_id,
+                    "floor_name": floor_names.get(floor_id, floor_id),
+                    "type": edata["type"],
+                    "length": edata["length"],
+                    "seconds": edata["seconds"],
+                    "width": edata["width"],
+                    "slope": edata["slope"],
+                    "wait_seconds": (dep - lab.arrival).total_seconds(),
+                    "arrival": arr_v.isoformat(),
+                    "cross_floor": edata["cross_floor"],
+                }
+                new_label = Label(
+                    node=v,
+                    arrival=arr_v,
+                    distance=dist_v,
+                    seq=seq_v,
+                    path=lab.path + [step],
                 )
+                if _add_label(labels[v], new_label):
+                    counter += 1
+                    heapq.heappush(
+                        heap,
+                        (new_label.arrival, new_label.distance, new_label.seq, counter, new_label),
+                    )
 
     if best is None:
-        # Static path exists but closures block within 24h.
-        blocking = _find_blocking_closures(G, start, end, min_width, max_slope, closures_by_edge, deadline)
+        # Static path exists but closures block every option within 24h.
+        blocking = _find_blocking_closures(
+            G, start, end, min_width, max_slope, closures_by_edge
+        )
         return {
             "reachable": False,
-            "reasons": ["路径被封闭时段阻断，24 小时内无法到达"],
+            "reasons": ["路径被封闭时段阻断，出发后 24 小时内无法到达"],
             "blocking_closures": blocking,
         }
 
@@ -387,35 +421,81 @@ def find_route(
     }
 
 
+# ---------------------------------------------------------------------------
+# Unreachability diagnosis
+# ---------------------------------------------------------------------------
+
+def _static_shortest_path(
+    G: nx.MultiDiGraph,
+    start: str,
+    end: str,
+    min_width: float,
+    max_slope: float,
+) -> list[tuple[str, str, str]] | None:
+    """Free-flow shortest static path over the complete parallel channel set.
+
+    Primary weight is total traversal seconds; ties break by total length and
+    then by the lexicographic edge-ID (channel key) sequence. Returns a list
+    of (u, v, edge_key) triples, or None if no static path exists.
+    """
+    inf = (float("inf"), float("inf"), ())
+    best_key: dict[str, tuple] = {start: (0.0, 0.0, ())}
+    prev: dict[str, tuple[str, str]] = {}
+    heap: list[tuple] = [(0.0, 0.0, (), start)]
+    settled: set[str] = set()
+
+    while heap:
+        secs, length, seq, u = heapq.heappop(heap)
+        if u in settled:
+            continue
+        settled.add(u)
+        if u == end:
+            break
+        for v, parallel in G[u].items():
+            for ekey, edata in parallel.items():
+                if not _edge_static_ok(edata, min_width, max_slope):
+                    continue
+                cand = (
+                    secs + edata["seconds"],
+                    length + edata["length"],
+                    seq + (ekey,),
+                )
+                if cand < best_key.get(v, inf):
+                    best_key[v] = cand
+                    prev[v] = (u, ekey)
+                    heapq.heappush(heap, (*cand, v))
+
+    if end not in prev:
+        return None if end != start else []
+
+    # Reconstruct (u, v, key) triples.
+    triples: list[tuple[str, str, str]] = []
+    cur = end
+    while cur != start:
+        u, ekey = prev[cur]
+        triples.append((u, cur, ekey))
+        cur = u
+    triples.reverse()
+    return triples
+
+
 def _find_blocking_closures(
-    G: nx.DiGraph,
+    G: nx.MultiDiGraph,
     start: str,
     end: str,
     min_width: float,
     max_slope: float,
     closures_by_edge: dict[str, list[tuple[datetime, datetime]]],
-    deadline: datetime,
 ) -> list[dict[str, Any]]:
-    """Find closures that block the free-flow shortest path (by seconds)."""
-    def static_ok(u: str, v: str, data: dict[str, Any]) -> bool:
-        return (
-            data["type"] in PASSABLE_TYPES
-            and data["type"] != TYPE_STAIRS
-            and data["width"] >= min_width
-            and data["slope"] <= max_slope
-        )
-
-    static_G = nx.subgraph_view(G, filter_edge=lambda u, v: static_ok(u, v, G[u][v]))
-    try:
-        path = nx.shortest_path(static_G, start, end, weight="seconds")
-    except nx.NetworkXNoPath:
+    """List closure periods registered on the channels of the best free-flow
+    static path (one specific channel per hop, even among parallel ones)."""
+    triples = _static_shortest_path(G, start, end, min_width, max_slope)
+    if triples is None:
         return []
 
     blocking: list[dict[str, Any]] = []
-    for i in range(len(path) - 1):
-        u = path[i]
-        v = path[i + 1]
-        edata = G[u][v]
+    for u, v, ekey in triples:
+        edata = G[u][v][ekey]
         eid = edata["id"]
         for cs, ce in closures_by_edge.get(eid, []):
             blocking.append(

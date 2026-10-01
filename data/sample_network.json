@@ -16,7 +16,8 @@
     { "id": "n10", "floor_id": "f2", "x": 10, "y": -10, "kind": "junction", "name": "坡道出口" },
     { "id": "n11", "floor_id": "f2", "x": 30, "y": 10, "kind": "room", "name": "201室" },
     { "id": "n12", "floor_id": "f2", "x": 30, "y": -10, "kind": "room", "name": "202室" },
-    { "id": "n13", "floor_id": "f1", "x": 0, "y": -10, "kind": "exit", "name": "安全出口" }
+    { "id": "n13", "floor_id": "f1", "x": 0, "y": -10, "kind": "exit", "name": "安全出口" },
+    { "id": "n14", "floor_id": "f1", "x": 10, "y": 6, "kind": "room", "name": "活动室" }
   ],
   "edges": [
     { "id": "e1", "from": "n1", "to": "n2", "type": "corridor", "length": 10, "seconds": 12, "width": 1.8, "slope": 0 },
@@ -44,6 +45,8 @@
     { "id": "e23", "from": "n6", "to": "n7", "type": "stairs", "length": 6, "seconds": 15, "width": 1.0, "slope": 30 },
     { "id": "e24", "from": "n7", "to": "n6", "type": "stairs", "length": 6, "seconds": 15, "width": 1.0, "slope": 30 },
     { "id": "e25", "from": "n1", "to": "n13", "type": "corridor", "length": 10, "seconds": 12, "width": 1.5, "slope": 0 },
-    { "id": "e26", "from": "n13", "to": "n1", "type": "corridor", "length": 10, "seconds": 12, "width": 1.5, "slope": 0 }
+    { "id": "e26", "from": "n13", "to": "n1", "type": "corridor", "length": 10, "seconds": 12, "width": 1.5, "slope": 0 },
+    { "id": "e27", "from": "n2", "to": "n14", "type": "corridor", "length": 6, "seconds": 6, "width": 2.0, "slope": 0 },
+    { "id": "e28", "from": "n2", "to": "n14", "type": "corridor", "length": 7, "seconds": 30, "width": 0.9, "slope": 0 }
   ]
 }
